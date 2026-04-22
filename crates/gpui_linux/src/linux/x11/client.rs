@@ -303,12 +303,22 @@ pub(crate) struct X11Client(pub(crate) Rc<RefCell<X11ClientState>>);
 
 impl X11Client {
     pub(crate) fn new() -> anyhow::Result<Self> {
+        let bench_start = Instant::now();
+        let bench_profile = std::env::var_os("GPUI_STARTUP_PROFILE").is_some();
+        let bench_blocking_fonts = std::env::var_os("GPUI_STARTUP_BLOCKING_FONTS").is_some();
+
         // Start font system loading on a background thread immediately.
         // FontSystem::new() scans all system fonts via fontdb, which takes time.
         // By running it in parallel with XCB + XKB setup, we hide the cost.
-        let font_handle = std::thread::spawn(|| -> Arc<dyn PlatformTextSystem> {
-            Arc::new(crate::linux::CosmicTextSystem::new(DEFAULT_FONT_FAMILY))
-        });
+        //
+        // GPUI_STARTUP_BLOCKING_FONTS=1 disables this for A/B benchmarking.
+        let font_handle = if bench_blocking_fonts {
+            None
+        } else {
+            Some(std::thread::spawn(|| -> Arc<dyn PlatformTextSystem> {
+                Arc::new(crate::linux::CosmicTextSystem::new(DEFAULT_FONT_FAMILY))
+            }))
+        };
 
         let event_loop = EventLoop::try_new()?;
         let handle = event_loop.handle();
@@ -421,8 +431,39 @@ impl X11Client {
         let screen = &xcb_connection.setup().roots[x_root_index];
         let compositor_gpu = detect_compositor_gpu(&xcb_connection, screen);
 
-        // Join the font thread. Font loading ran in parallel with XCB + XKB setup above.
-        let text_system = font_handle.join().expect("font system thread panicked");
+        if bench_profile {
+            eprintln!(
+                "[startup x11 t={:>7.3}ms] xcb + xkb setup done",
+                bench_start.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+
+        // Produce the text system: either join the async thread, or load inline.
+        let text_system: Arc<dyn PlatformTextSystem> = if let Some(handle) = font_handle {
+            let wait_start = Instant::now();
+            let ts = handle.join().expect("font system thread panicked");
+            if bench_profile {
+                eprintln!(
+                    "[startup x11 t={:>7.3}ms] font thread joined (wait={:.3}ms)",
+                    bench_start.elapsed().as_secs_f64() * 1000.0,
+                    wait_start.elapsed().as_secs_f64() * 1000.0
+                );
+            }
+            ts
+        } else {
+            let font_start = Instant::now();
+            let ts: Arc<dyn PlatformTextSystem> =
+                Arc::new(crate::linux::CosmicTextSystem::new(DEFAULT_FONT_FAMILY));
+            if bench_profile {
+                eprintln!(
+                    "[startup x11 t={:>7.3}ms] font loaded inline ({:.3}ms)",
+                    bench_start.elapsed().as_secs_f64() * 1000.0,
+                    font_start.elapsed().as_secs_f64() * 1000.0
+                );
+            }
+            ts
+        };
+
         let (common, main_receiver) =
             LinuxCommon::new_with_text_system(event_loop.get_signal(), text_system);
 

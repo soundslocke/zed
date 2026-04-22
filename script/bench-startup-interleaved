@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+#
+# Interleaved variant of bench-startup: alternates modes each run so any
+# system-wide drift (load, thermals, etc.) affects both modes equally.
+#
+# Usage:
+#   script/bench-startup-interleaved [iters]
+
+set -euo pipefail
+
+ITERS="${1:-100}"
+WARMUP=5
+
+cd "$(dirname "$0")/.."
+
+BIN="target/release/examples/startup_bench"
+
+echo "Building release..."
+cargo build --release --example startup_bench -p gpui >/dev/null
+
+blocking_inits=()
+blocking_renders=()
+async_inits=()
+async_renders=()
+
+for ((i = 1; i <= ITERS; i++)); do
+    # Blocking run
+    out_b="$(env GPUI_STARTUP_BLOCKING_FONTS=1 "$BIN" 2>/dev/null || true)"
+    bi="$(echo "$out_b" | awk -F= '/^STARTUP_INIT_MS=/{print $2}')"
+    br="$(echo "$out_b" | awk -F= '/^STARTUP_RENDER_MS=/{print $2}')"
+
+    # Async run
+    out_a="$("$BIN" 2>/dev/null || true)"
+    ai="$(echo "$out_a" | awk -F= '/^STARTUP_INIT_MS=/{print $2}')"
+    ar="$(echo "$out_a" | awk -F= '/^STARTUP_RENDER_MS=/{print $2}')"
+
+    if (( i > WARMUP )); then
+        [[ -n "$bi" ]] && blocking_inits+=("$bi")
+        [[ -n "$br" ]] && blocking_renders+=("$br")
+        [[ -n "$ai" ]] && async_inits+=("$ai")
+        [[ -n "$ar" ]] && async_renders+=("$ar")
+    fi
+    printf "pair %3d  blocking: init=%sms render=%sms  |  async: init=%sms render=%sms%s\n" \
+        "$i" "$bi" "$br" "$ai" "$ar" \
+        "$([[ $i -le $WARMUP ]] && echo ' (warmup)' || echo '')"
+done
+
+summarize() {
+    local name="$1"; shift
+    printf '%s\n' "$@" | python3 -c '
+import sys, statistics
+name = sys.argv[1]
+vals = [float(l.strip()) for l in sys.stdin if l.strip()]
+if not vals:
+    print(f"  {name}: no samples")
+    sys.exit(0)
+vs = sorted(vals)
+def pct(p):
+    k = (len(vs) - 1) * p
+    f, c = int(k), min(int(k) + 1, len(vs) - 1)
+    return vs[f] + (vs[c] - vs[f]) * (k - f)
+print(f"  {name}: n={len(vals)} "
+      f"min={min(vals):6.2f} p05={pct(0.05):6.2f} "
+      f"median={statistics.median(vals):6.2f} mean={statistics.mean(vals):6.2f} "
+      f"p95={pct(0.95):6.2f} max={max(vals):6.2f}")
+' "$name"
+}
+
+echo ""
+echo "=== Blocking fonts (baseline) ==="
+summarize "init_ms  " "${blocking_inits[@]}"
+summarize "render_ms" "${blocking_renders[@]}"
+
+echo ""
+echo "=== Async fonts (this branch) ==="
+summarize "init_ms  " "${async_inits[@]}"
+summarize "render_ms" "${async_renders[@]}"
+
+echo ""
+# Compute paired delta on init
+python3 -c '
+import sys, statistics
+blocking = [float(x) for x in sys.argv[1].split(",") if x]
+asy = [float(x) for x in sys.argv[2].split(",") if x]
+n = min(len(blocking), len(asy))
+deltas = [asy[i] - blocking[i] for i in range(n)]
+deltas_sorted = sorted(deltas)
+def pct(p):
+    k = (len(deltas_sorted) - 1) * p
+    f, c = int(k), min(int(k) + 1, len(deltas_sorted) - 1)
+    return deltas_sorted[f] + (deltas_sorted[c] - deltas_sorted[f]) * (k - f)
+wins = sum(1 for d in deltas if d < 0)
+print(f"=== Paired delta (async - blocking), n={n} ===")
+print(f"  init_ms:  median={statistics.median(deltas):+6.2f}  mean={statistics.mean(deltas):+6.2f}  "
+      f"p05={pct(0.05):+6.2f}  p95={pct(0.95):+6.2f}  wins={wins}/{n}")
+' "$(IFS=,; echo "${blocking_inits[*]}")" "$(IFS=,; echo "${async_inits[*]}")"
+python3 -c '
+import sys, statistics
+blocking = [float(x) for x in sys.argv[1].split(",") if x]
+asy = [float(x) for x in sys.argv[2].split(",") if x]
+n = min(len(blocking), len(asy))
+deltas = [asy[i] - blocking[i] for i in range(n)]
+deltas_sorted = sorted(deltas)
+def pct(p):
+    k = (len(deltas_sorted) - 1) * p
+    f, c = int(k), min(int(k) + 1, len(deltas_sorted) - 1)
+    return deltas_sorted[f] + (deltas_sorted[c] - deltas_sorted[f]) * (k - f)
+wins = sum(1 for d in deltas if d < 0)
+print(f"  render_ms: median={statistics.median(deltas):+6.2f}  mean={statistics.mean(deltas):+6.2f}  "
+      f"p05={pct(0.05):+6.2f}  p95={pct(0.95):+6.2f}  wins={wins}/{n}")
+' "$(IFS=,; echo "${blocking_renders[*]}")" "$(IFS=,; echo "${async_renders[*]}")"

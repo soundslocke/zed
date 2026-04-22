@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+#
+# Benchmarks GPUI Linux startup with and without async font loading.
+# Requires a display (Wayland session or X11).
+#
+# Usage:
+#   script/bench-startup [iters]
+#
+# Default iters = 25. First 5 runs in each mode are treated as warmup.
+
+set -euo pipefail
+
+ITERS="${1:-25}"
+WARMUP=5
+
+cd "$(dirname "$0")/.."
+
+BIN="target/release/examples/startup_bench"
+
+echo "Building release..."
+cargo build --release --example startup_bench -p gpui >/dev/null
+
+if [[ ! -x "$BIN" ]]; then
+    echo "error: $BIN not found after build" >&2
+    exit 1
+fi
+
+run_mode() {
+    local label="$1"
+    shift
+    echo ""
+    echo "=== $label ($ITERS runs, first $WARMUP are warmup) ==="
+
+    local inits=()
+    local renders=()
+    for ((i = 1; i <= ITERS; i++)); do
+        local out
+        out="$("$@" "$BIN" 2>/dev/null || true)"
+        local init
+        init="$(echo "$out" | awk -F= '/^STARTUP_INIT_MS=/{print $2}')"
+        local render
+        render="$(echo "$out" | awk -F= '/^STARTUP_RENDER_MS=/{print $2}')"
+        if [[ -z "$init" || -z "$render" ]]; then
+            echo "  run $i: FAILED (no output)"
+            continue
+        fi
+        if (( i > WARMUP )); then
+            inits+=("$init")
+            renders+=("$render")
+        fi
+        printf "  run %2d: init=%sms render=%sms%s\n" "$i" "$init" "$render" \
+            "$([[ $i -le $WARMUP ]] && echo ' (warmup)' || echo '')"
+    done
+
+    echo ""
+    summarize "init_ms"   "${inits[@]}"
+    summarize "render_ms" "${renders[@]}"
+}
+
+summarize() {
+    local name="$1"; shift
+    local count=$#
+    if (( count == 0 )); then
+        echo "  $name: no samples"
+        return
+    fi
+    printf '%s\n' "$@" | python3 -c '
+import sys, statistics
+name = sys.argv[1]
+vals = [float(l.strip()) for l in sys.stdin if l.strip()]
+if not vals:
+    print(f"  {name}: no samples")
+    sys.exit(0)
+vals_sorted = sorted(vals)
+def pct(p):
+    k = (len(vals_sorted) - 1) * p
+    f, c = int(k), min(int(k) + 1, len(vals_sorted) - 1)
+    return vals_sorted[f] + (vals_sorted[c] - vals_sorted[f]) * (k - f)
+print(f"  {name}: n={len(vals)} "
+      f"min={min(vals):6.2f} "
+      f"p05={pct(0.05):6.2f} "
+      f"median={statistics.median(vals):6.2f} "
+      f"mean={statistics.mean(vals):6.2f} "
+      f"p95={pct(0.95):6.2f} "
+      f"max={max(vals):6.2f}")
+' "$name"
+}
+
+run_mode "Blocking fonts (baseline)"  env GPUI_STARTUP_BLOCKING_FONTS=1
+run_mode "Async fonts (this branch)"  env
+
+echo ""
+echo "Done."

@@ -161,6 +161,9 @@ unicode-segmentation = { workspace = true }
 http_client = { workspace = true, features = ["test-support"] }
 reqwest_client = { workspace = true, features = ["test-support"] }
 
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dev-dependencies]
+gpui_platform = { workspace = true, features = ["font-kit", "wayland", "x11"] }
+
 [target.'cfg(target_family = "wasm")'.dev-dependencies]
 wasm-bindgen = { workspace = true }
 gpui_web.workspace = true
@@ -247,3 +250,7 @@ path = "examples/list_example.rs"
 [[example]]
 name = "mouse_pressure"
 path = "examples/mouse_pressure.rs"
+
+[[example]]
+name = "startup_bench"
+path = "examples/startup_bench.rs"
