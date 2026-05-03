@@ -7,6 +7,19 @@ Welcome to Zed, a high-performance, multiplayer code editor from the creators of
 
 ---
 
+### Fork notes for `soundslocke/zed`
+
+This fork carries [vendored custom_draw work](crates/gpui/docs/custom_draw.md) from [ahkohd/ggpui](https://github.com/ahkohd/ggpui) PR [#1](https://github.com/ahkohd/ggpui/pull/1), rebased onto current Zed mainline (as of September 3rd, 2026).
+
+That `custom_draw.md` doc from ggpui is accurate *except*:
+
+- Excluded the 10MB binary `crates/gpui/examples/assets/bird_60fps.mp4` file here. Run the video example with an explicit path if desired:
+  ```sh
+  cargo run -p gpui --features video-ffmpeg --example custom_draw_api_video -- --video /path/to/your.mp4
+  ```
+- `crates/gpui/examples/custom_drawing.rs` is present but not listed.
+- I'm only testing/using this with WGPU in Linux so I'm unsure about the other rendering paths.
+
 ### Installation
 
 On macOS, Linux, and Windows you can [download Zed directly](https://zed.dev/download) or install Zed via your local package manager ([macOS](https://zed.dev/docs/installation#macos)/[Linux](https://zed.dev/docs/linux#installing-via-a-package-manager)/[Windows](https://zed.dev/docs/windows#package-managers)).

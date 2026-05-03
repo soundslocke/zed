@@ -1,5 +1,11 @@
-use crate::metal_atlas::MetalAtlas;
-use anyhow::{Context as _, Result};
+use crate::{
+    custom_draw::{
+        ArgumentBufferBinding, MetalBufferSnapshot, MetalCustomComputePipeline,
+        MetalCustomDrawRegistry, MetalCustomPipeline,
+    },
+    metal_atlas::MetalAtlas,
+};
+use anyhow::{Context as _, Result, anyhow};
 use block::ConcreteBlock;
 use cocoa::{
     base::{NO, YES},
@@ -7,8 +13,8 @@ use cocoa::{
     quartzcore::AutoresizingMask,
 };
 use gpui::{
-    AtlasTextureId, Background, Bounds, ContentMask, DevicePixels, PaintSurface, Path, Point,
-    PrimitiveBatch, ScaledPixels, Scene, Size, point, size,
+    AtlasTextureId, Background, Bounds, ContentMask, CustomFrameDiagnostics, CustomGpuFrameProfile,
+    DevicePixels, PaintSurface, Path, Point, PrimitiveBatch, ScaledPixels, Scene, Size, point, size,
 };
 #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
 use image::RgbaImage;
@@ -25,7 +31,9 @@ use metal::{
 use objc::{self, msg_send, sel, sel_impl};
 use parking_lot::Mutex;
 
-use std::{cell::Cell, ffi::c_void, mem, mem::MaybeUninit, ops::Range, ptr, slice, sync::Arc};
+use std::{
+    cell::Cell, ffi::c_void, mem, mem::MaybeUninit, ops::Range, ptr, slice, sync::Arc, time::Instant,
+};
 
 // Exported to metal
 pub(crate) type PointF = gpui::Point<f32>;
@@ -126,13 +134,16 @@ pub struct MetalRenderer {
     monochrome_sprites_pipeline_state: metal::RenderPipelineState,
     polychrome_sprites_pipeline_state: metal::RenderPipelineState,
     surfaces_pipeline_state: metal::RenderPipelineState,
+    depth_disabled_state: metal::DepthStencilState,
     unit_vertices: metal::Buffer,
     #[allow(clippy::arc_with_non_send_sync)]
     instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
     sprite_atlas: Arc<MetalAtlas>,
+    custom_draw: Arc<MetalCustomDrawRegistry>,
     core_video_texture_cache: core_video::metal_texture_cache::CVMetalTextureCache,
     path_intermediate_texture: Option<metal::Texture>,
     path_intermediate_msaa_texture: Option<metal::Texture>,
+    window_custom_depth_texture: Option<metal::Texture>,
     path_sample_count: u32,
     /// Offscreen render target reused across `render_scene` calls when
     /// rendering headlessly without reading pixels back.
@@ -323,9 +334,14 @@ impl MetalRenderer {
             "surface_fragment",
             MTLPixelFormat::BGRA8Unorm,
         );
+        let depth_disabled_state = create_depth_disabled_state(&device);
 
         let command_queue = device.new_command_queue();
         let sprite_atlas = Arc::new(MetalAtlas::new(device.clone(), is_apple_gpu));
+        let custom_draw = Arc::new(MetalCustomDrawRegistry::new(
+            device.clone(),
+            MTLPixelFormat::BGRA8Unorm,
+        ));
         let core_video_texture_cache =
             CVMetalTextureCache::new(None, device.clone(), None).unwrap();
 
@@ -345,12 +361,15 @@ impl MetalRenderer {
             monochrome_sprites_pipeline_state,
             polychrome_sprites_pipeline_state,
             surfaces_pipeline_state,
+            depth_disabled_state,
             unit_vertices,
             instance_buffer_pool,
             sprite_atlas,
+            custom_draw,
             core_video_texture_cache,
             path_intermediate_texture: None,
             path_intermediate_msaa_texture: None,
+            window_custom_depth_texture: None,
             path_sample_count: PATH_SAMPLE_COUNT,
             #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
             headless_render_target: None,
@@ -469,6 +488,18 @@ impl MetalRenderer {
             return;
         };
 
+        let frame_encode_start = Instant::now();
+        let custom_gpu_profile = if self.custom_draw.gpu_profiling_enabled() {
+            build_custom_gpu_profile(scene)
+        } else {
+            None
+        };
+        let custom_frame_diagnostics = if self.custom_draw.frame_diagnostics_enabled() {
+            build_custom_frame_diagnostics(scene)
+        } else {
+            None
+        };
+
         let command_buffer = match self.render_frame(scene, drawable.texture(), viewport_size) {
             Ok(command_buffer) => command_buffer,
             Err(error) => {
@@ -476,6 +507,76 @@ impl MetalRenderer {
                 return;
             }
         };
+
+        let custom_draw = self.custom_draw.clone();
+        let cpu_encode_time_ns = duration_as_u64_nanoseconds(frame_encode_start.elapsed());
+        let custom_frame_diagnostics = custom_frame_diagnostics.map(|mut diagnostics| {
+            diagnostics.cpu_encode_time_ns = cpu_encode_time_ns;
+            diagnostics
+        });
+        let submit_instant = Arc::new(std::sync::Mutex::new(None::<Instant>));
+        let scheduled_instant = Arc::new(std::sync::Mutex::new(None::<Instant>));
+
+        if custom_frame_diagnostics.is_some() {
+            let scheduled_instant = Arc::clone(&scheduled_instant);
+            let scheduled_block = ConcreteBlock::new(move |_| {
+                if let Ok(mut scheduled_value) = scheduled_instant.lock()
+                    && scheduled_value.is_none()
+                {
+                    *scheduled_value = Some(Instant::now());
+                }
+            });
+            let scheduled_block = scheduled_block.copy();
+            command_buffer.add_scheduled_handler(&scheduled_block);
+        }
+
+        let completed_submit_instant = Arc::clone(&submit_instant);
+        let completed_scheduled_instant = Arc::clone(&scheduled_instant);
+        let block = ConcreteBlock::new(move |completed_command_buffer| {
+            let gpu_time_ns = metal_command_buffer_gpu_time_ns(completed_command_buffer);
+            if let Some(mut custom_gpu_profile) = custom_gpu_profile {
+                custom_gpu_profile.gpu_time_ns = gpu_time_ns;
+                custom_draw.record_gpu_profile(custom_gpu_profile);
+            }
+
+            if let Some(mut custom_frame_diagnostics) = custom_frame_diagnostics {
+                let completed_instant = Instant::now();
+                let submit_instant = completed_submit_instant.lock().ok().and_then(|value| *value);
+                let scheduled_instant = completed_scheduled_instant
+                    .lock()
+                    .ok()
+                    .and_then(|value| *value);
+
+                custom_frame_diagnostics.gpu_time_ns = gpu_time_ns;
+                custom_frame_diagnostics.submit_to_scheduled_ns = submit_instant.and_then(|submit| {
+                    scheduled_instant.and_then(|scheduled| {
+                        scheduled
+                            .checked_duration_since(submit)
+                            .map(duration_as_u64_nanoseconds)
+                    })
+                });
+                custom_frame_diagnostics.submit_to_completed_ns = submit_instant.and_then(|submit| {
+                    completed_instant
+                        .checked_duration_since(submit)
+                        .map(duration_as_u64_nanoseconds)
+                });
+                custom_frame_diagnostics.scheduled_to_completed_ns =
+                    scheduled_instant.and_then(|scheduled| {
+                        completed_instant
+                            .checked_duration_since(scheduled)
+                            .map(duration_as_u64_nanoseconds)
+                    });
+                custom_draw.record_frame_diagnostics(custom_frame_diagnostics);
+            }
+        });
+        let block = block.copy();
+        command_buffer.add_completed_handler(&block);
+
+        if custom_frame_diagnostics.is_some()
+            && let Ok(mut submit_value) = submit_instant.lock()
+        {
+            *submit_value = Some(Instant::now());
+        }
 
         if self.presents_with_transaction {
             command_buffer.commit();
@@ -731,6 +832,9 @@ impl MetalRenderer {
                     viewport_size,
                     command_encoder,
                 ),
+                PrimitiveBatch::Custom(range) => {
+                    self.draw_custom_draws(&scene.custom_draws[range], writer, command_encoder)
+                }
                 PrimitiveBatch::SubpixelSprites { .. } => unreachable!(),
             }
         }
@@ -1224,6 +1328,17 @@ fn new_command_encoder_for_texture<'a>(
         color_attachment.set_load_action(metal::MTLLoadAction::Load);
     }
 
+    if let Some(depth_texture) = depth_texture
+        && let Some(depth_attachment) = render_pass_descriptor.depth_attachment()
+    {
+        depth_attachment.set_texture(Some(depth_texture));
+        depth_attachment.set_load_action(depth_load_action);
+        depth_attachment.set_store_action(metal::MTLStoreAction::Store);
+        if matches!(depth_load_action, metal::MTLLoadAction::Clear) {
+            depth_attachment.set_clear_depth(1.0);
+        }
+    }
+
     let command_encoder = command_buffer.new_render_command_encoder(render_pass_descriptor);
     command_encoder.set_viewport(metal::MTLViewport {
         originX: 0.0,
@@ -1264,6 +1379,13 @@ fn read_texture_to_image(texture: &metal::TextureRef) -> Result<RgbaImage> {
     }
 
     RgbaImage::from_raw(width, height, pixels).context("failed to create RgbaImage from pixel data")
+}
+
+fn create_depth_disabled_state(device: &metal::DeviceRef) -> metal::DepthStencilState {
+    let descriptor = metal::DepthStencilDescriptor::new();
+    descriptor.set_depth_compare_function(metal::MTLCompareFunction::Always);
+    descriptor.set_depth_write_enabled(false);
+    device.new_depth_stencil_state(&descriptor)
 }
 
 fn build_pipeline_state(
@@ -1531,6 +1653,102 @@ impl InstanceBufferWriter {
         drop(filled);
         current
     }
+}
+
+fn build_custom_work_counts(scene: &Scene) -> Option<(u32, u32, u32, u32)> {
+    if scene.custom_draws.is_empty() && scene.custom_computes.is_empty() {
+        return None;
+    }
+
+    let mut has_window_custom_draw = false;
+    let mut offscreen_target_hashes = std::collections::HashSet::new();
+    for draw in scene.custom_draws.iter() {
+        if draw.target.is_some() {
+            offscreen_target_hashes.insert(draw.batch_key.target_hash);
+        } else {
+            has_window_custom_draw = true;
+        }
+    }
+
+    let custom_render_pass_count =
+        offscreen_target_hashes.len() as u32 + u32::from(has_window_custom_draw);
+    let custom_compute_pass_count = u32::from(!scene.custom_computes.is_empty());
+
+    Some((
+        scene.custom_draws.len() as u32,
+        scene.custom_computes.len() as u32,
+        custom_render_pass_count,
+        custom_compute_pass_count,
+    ))
+}
+
+fn build_custom_gpu_profile(scene: &Scene) -> Option<CustomGpuFrameProfile> {
+    let (
+        custom_draw_count,
+        custom_compute_count,
+        custom_render_pass_count,
+        custom_compute_pass_count,
+    ) = build_custom_work_counts(scene)?;
+
+    Some(CustomGpuFrameProfile {
+        custom_draw_count,
+        custom_compute_count,
+        custom_render_pass_count,
+        custom_compute_pass_count,
+        gpu_time_ns: None,
+    })
+}
+
+fn build_custom_frame_diagnostics(scene: &Scene) -> Option<CustomFrameDiagnostics> {
+    let (
+        custom_draw_count,
+        custom_compute_count,
+        custom_render_pass_count,
+        custom_compute_pass_count,
+    ) = build_custom_work_counts(scene)?;
+
+    Some(CustomFrameDiagnostics {
+        custom_draw_count,
+        custom_compute_count,
+        custom_render_pass_count,
+        custom_compute_pass_count,
+        retry_count: 0,
+        cpu_encode_time_ns: 0,
+        submit_to_scheduled_ns: None,
+        submit_to_completed_ns: None,
+        scheduled_to_completed_ns: None,
+        gpu_time_ns: None,
+    })
+}
+
+fn metal_command_buffer_gpu_time_ns(command_buffer: &metal::CommandBufferRef) -> Option<u64> {
+    #[allow(clippy::disallowed_methods)]
+    unsafe {
+        let has_gpu_start_time: bool =
+            msg_send![command_buffer, respondsToSelector: sel!(GPUStartTime)];
+        let has_gpu_end_time: bool =
+            msg_send![command_buffer, respondsToSelector: sel!(GPUEndTime)];
+        if !has_gpu_start_time || !has_gpu_end_time {
+            return None;
+        }
+
+        let gpu_start_time: f64 = msg_send![command_buffer, GPUStartTime];
+        let gpu_end_time: f64 = msg_send![command_buffer, GPUEndTime];
+        if gpu_start_time <= 0.0 || gpu_end_time < gpu_start_time {
+            return None;
+        }
+
+        let gpu_time_ns = ((gpu_end_time - gpu_start_time) * 1_000_000_000.0).round();
+        if !gpu_time_ns.is_finite() || gpu_time_ns < 0.0 {
+            return None;
+        }
+
+        Some(gpu_time_ns as u64)
+    }
+}
+
+fn duration_as_u64_nanoseconds(duration: std::time::Duration) -> u64 {
+    duration.as_nanos().min(u64::MAX as u128) as u64
 }
 
 #[repr(C)]
