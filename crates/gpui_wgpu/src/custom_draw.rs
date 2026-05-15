@@ -1371,7 +1371,7 @@ impl WgpuCustomDrawRegistry {
         let validator_flags =
             naga::valid::ValidationFlags::all() ^ naga::valid::ValidationFlags::BINDINGS;
         let mut info =
-            naga::valid::Validator::new(validator_flags, naga::valid::Capabilities::empty())
+            naga::valid::Validator::new(validator_flags, naga::valid::Capabilities::IMMEDIATES)
                 .validate(&module)
                 .map_err(|error| anyhow!("custom draw WGSL validation failed: {error}"))?;
 
@@ -1405,9 +1405,10 @@ impl WgpuCustomDrawRegistry {
             push_constants_slot,
         )?;
         if push_constants.is_some() {
-            info = naga::valid::Validator::new(validator_flags, naga::valid::Capabilities::empty())
-                .validate(&module)
-                .map_err(|error| anyhow!("custom draw WGSL validation failed: {error}"))?;
+            info =
+                naga::valid::Validator::new(validator_flags, naga::valid::Capabilities::IMMEDIATES)
+                    .validate(&module)
+                    .map_err(|error| anyhow!("custom draw WGSL validation failed: {error}"))?;
         }
 
         let attribute_locations = build_attribute_locations(&desc.vertex_fetches)?;
@@ -1454,7 +1455,7 @@ impl WgpuCustomDrawRegistry {
 
         info = naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::empty(),
+            naga::valid::Capabilities::IMMEDIATES,
         )
         .validate(&module)
         .map_err(|error| anyhow!("custom draw WGSL validation failed: {error}"))?;
@@ -1726,7 +1727,7 @@ impl WgpuCustomDrawRegistry {
         let validator_flags =
             naga::valid::ValidationFlags::all() ^ naga::valid::ValidationFlags::BINDINGS;
         let mut info =
-            naga::valid::Validator::new(validator_flags, naga::valid::Capabilities::empty())
+            naga::valid::Validator::new(validator_flags, naga::valid::Capabilities::IMMEDIATES)
                 .validate(&module)
                 .map_err(|error| anyhow!("custom compute WGSL validation failed: {error}"))?;
 
@@ -1747,9 +1748,10 @@ impl WgpuCustomDrawRegistry {
             push_constants_slot,
         )?;
         if push_constants.is_some() {
-            info = naga::valid::Validator::new(validator_flags, naga::valid::Capabilities::empty())
-                .validate(&module)
-                .map_err(|error| anyhow!("custom compute WGSL validation failed: {error}"))?;
+            info =
+                naga::valid::Validator::new(validator_flags, naga::valid::Capabilities::IMMEDIATES)
+                    .validate(&module)
+                    .map_err(|error| anyhow!("custom compute WGSL validation failed: {error}"))?;
         }
 
         let (mut bindings_by_name, bindings_by_slot) = build_binding_maps(&desc.bindings);
@@ -1783,7 +1785,7 @@ impl WgpuCustomDrawRegistry {
 
         info = naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::empty(),
+            naga::valid::Capabilities::IMMEDIATES,
         )
         .validate(&module)
         .map_err(|error| anyhow!("custom compute WGSL validation failed: {error}"))?;
