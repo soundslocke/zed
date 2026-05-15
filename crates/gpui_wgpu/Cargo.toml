@@ -45,7 +45,8 @@ wgpu = { workspace = true, features = ["webgl"] }
 
 [dev-dependencies]
 criterion.workspace = true
-naga = { version = "29.0.4", features = ["wgsl-in"] }
+# Must match the git source used above; Cargo requires one canonical source per dependency.
+naga = { git = "https://github.com/zed-industries/wgpu", rev = "465557eccfe77c840a9b4936f1408da9503372c4", features = ["wgsl-in"] }
 
 [[bench]]
 name = "layout_line"
