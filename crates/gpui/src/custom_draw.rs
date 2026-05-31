@@ -83,6 +83,9 @@ pub enum CustomBlendMode {
     Alpha,
     /// Premultiplied alpha blending.
     PremultipliedAlpha,
+    /// Additive blending (`src + dst`). Useful for glow/light effects where
+    /// the source's transparent and black regions contribute nothing.
+    Additive,
 }
 
 /// Depth compare function for custom pipelines.

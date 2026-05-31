@@ -3147,6 +3147,18 @@ fn map_blend_state(blend_mode: gpui::CustomBlendMode) -> Option<wgpu::BlendState
         gpui::CustomBlendMode::PremultipliedAlpha => {
             Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING)
         }
+        gpui::CustomBlendMode::Additive => Some(wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+        }),
     }
 }
 
