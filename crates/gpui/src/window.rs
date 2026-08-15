@@ -528,6 +528,16 @@ impl FocusId {
             .dispatch_tree
             .focus_contains(*self, other)
     }
+
+    /// Obtains whether an element rendered this handle in the most recently
+    /// rendered frame.
+    pub(crate) fn is_rendered(&self, window: &Window) -> bool {
+        window
+            .rendered_frame
+            .dispatch_tree
+            .focusable_node_id(*self)
+            .is_some()
+    }
 }
 
 /// A handle which can be used to track and manipulate the focused element in a window.
@@ -629,6 +639,18 @@ impl FocusHandle {
     /// Obtains whether this handle contains the given handle in the most recently rendered frame.
     pub fn contains(&self, other: &Self, window: &Window) -> bool {
         self.id.contains(other.id, window)
+    }
+
+    /// Obtains whether an element rendered this handle in the most recently
+    /// rendered frame.
+    ///
+    /// Focusing a handle that no element rendered strands key dispatch at the
+    /// window root, where none of the action handlers registered by elements
+    /// are reachable. Callers that restore a focus handle saved earlier (after
+    /// dismissing a modal, say) can use this to tell a target that is still on
+    /// screen from one that has since been removed.
+    pub fn is_rendered(&self, window: &Window) -> bool {
+        self.id.is_rendered(window)
     }
 
     /// Dispatch an action on the element that rendered this focus handle
