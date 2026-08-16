@@ -192,6 +192,19 @@ pub trait Platform: 'static {
         &self,
         options: PathPromptOptions,
     ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>>;
+    /// Same as [`Self::prompt_for_paths`], but opens the picker at `directory`
+    /// rather than wherever the platform would land by default.
+    ///
+    /// The directory is a hint: a platform with no way to express it, and a
+    /// portal backend that ignores the request, both fall back to the default
+    /// location rather than failing to open.
+    fn prompt_for_paths_in(
+        &self,
+        _directory: &Path,
+        options: PathPromptOptions,
+    ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
+        self.prompt_for_paths(options)
+    }
     fn prompt_for_new_path(
         &self,
         directory: &Path,

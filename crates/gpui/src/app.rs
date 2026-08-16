@@ -1586,6 +1586,18 @@ impl App {
         self.platform.prompt_for_paths(options)
     }
 
+    /// Same as [`Self::prompt_for_paths`], but opens the picker at `directory`.
+    ///
+    /// The directory is a hint. Platforms that cannot express it open at their
+    /// default location instead.
+    pub fn prompt_for_paths_in(
+        &self,
+        directory: &Path,
+        options: PathPromptOptions,
+    ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
+        self.platform.prompt_for_paths_in(directory, options)
+    }
+
     /// Displays a platform modal for selecting a new path where a file can be saved.
     ///
     /// The provided directory will be used to set the initial location.
